@@ -523,7 +523,9 @@ export class GatewayClient {
       detailCode === ConnectErrorDetailCodes.AUTH_PASSWORD_MISSING ||
       detailCode === ConnectErrorDetailCodes.AUTH_PASSWORD_MISMATCH ||
       detailCode === ConnectErrorDetailCodes.AUTH_RATE_LIMITED ||
-      detailCode === ConnectErrorDetailCodes.PAIRING_REQUIRED ||
+      // NOTE: PAIRING_REQUIRED is intentionally NOT in this list. Pairing can be
+      // approved by an operator while the client retries, so reconnect is allowed
+      // with normal exponential backoff. Once approved, the attempt succeeds.
       detailCode === ConnectErrorDetailCodes.CONTROL_UI_DEVICE_IDENTITY_REQUIRED ||
       detailCode === ConnectErrorDetailCodes.DEVICE_IDENTITY_REQUIRED
     ) {
