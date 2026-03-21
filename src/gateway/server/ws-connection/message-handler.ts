@@ -272,6 +272,7 @@ export function attachGatewayWsMessageHandler(params: {
     }
 
     const text = rawDataToString(data);
+    let handshakeFrameId: string | undefined;
     try {
       const parsed = JSON.parse(text);
       const frameType =
@@ -292,6 +293,7 @@ export function attachGatewayWsMessageHandler(params: {
             ? String((parsed as { id?: unknown }).id)
             : undefined
           : undefined;
+      handshakeFrameId = frameId;
       if (frameType || frameMethod || frameId) {
         setLastFrameMeta({ type: frameType, method: frameMethod, id: frameId });
       }
@@ -1136,6 +1138,16 @@ export function attachGatewayWsMessageHandler(params: {
       logGateway.error(`parse/handle error: ${String(err)}`);
       logWs("out", "parse-error", { connId, error: formatForLog(err) });
       if (!getClient()) {
+        if (handshakeFrameId) {
+          send({
+            type: "res",
+            id: handshakeFrameId,
+            ok: false,
+            error: errorShape(ErrorCodes.UNAVAILABLE, "internal handshake error"),
+          });
+        }
+        setHandshakeState("failed");
+        setCloseCause("handshake-internal-error");
         close();
       }
     }
