@@ -61,6 +61,11 @@ export function resolveGatewayErrorDetailCode(
  * browser client supports a bounded one-time retry with a cached device token
  * when the endpoint is trusted. Reconnect suppression for mismatch is handled
  * with client state (after retry budget is exhausted).
+ *
+ * NOTE: PAIRING_REQUIRED is intentionally NOT included here. Pairing CAN be
+ * approved by an operator while the client is retrying, so we allow reconnect
+ * with normal exponential backoff. Once approved, the next attempt succeeds
+ * and the client gets a HelloOk without requiring a manual page reload.
  */
 export function isNonRecoverableAuthError(error: GatewayErrorInfo | undefined): boolean {
   if (!error) {
@@ -73,7 +78,6 @@ export function isNonRecoverableAuthError(error: GatewayErrorInfo | undefined): 
     code === ConnectErrorDetailCodes.AUTH_PASSWORD_MISSING ||
     code === ConnectErrorDetailCodes.AUTH_PASSWORD_MISMATCH ||
     code === ConnectErrorDetailCodes.AUTH_RATE_LIMITED ||
-    code === ConnectErrorDetailCodes.PAIRING_REQUIRED ||
     code === ConnectErrorDetailCodes.CONTROL_UI_DEVICE_IDENTITY_REQUIRED ||
     code === ConnectErrorDetailCodes.DEVICE_IDENTITY_REQUIRED
   );
