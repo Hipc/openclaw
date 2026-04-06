@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "openclaw/extension-api": ["../../src/extensionAPI.ts"],
+      "openclaw/plugin-sdk": ["../../src/plugin-sdk/index.ts"],
+      "openclaw/plugin-sdk/*": ["../../src/plugin-sdk/*.ts"],
+      "@openclaw/*": ["../../extensions/*"]
+    }
+  },
+  "include": ["./*.ts"]
+}
