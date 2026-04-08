@@ -1,0 +1,44 @@
+{
+  "id": "cloudclaw_stt",
+  "name": "STT Plugin",
+  "description": "Speech-to-Text gateway plugin. Transcribes base64 audio via a named STT provider config and forwards the result to the specified session.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "select": {
+        "type": "string",
+        "description": "Default config name to use when configName is not specified in stt.send."
+      },
+      "configs": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "apikey"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["openai", "aliyun"],
+              "description": "STT provider type. Determines the API request format. Supported: openai, aliyun."
+            },
+            "apikey": {
+              "type": "string",
+              "description": "API key for the STT provider."
+            },
+            "url": {
+              "type": "string",
+              "description": "Optional custom STT endpoint URL. Defaults per type: openai uses OpenAI Whisper API, aliyun uses DashScope chat completions."
+            },
+            "model": {
+              "type": "string",
+              "description": "Model name to use. Defaults to whisper-1 for openai and qwen-asr-flash for aliyun."
+            }
+          }
+        },
+        "description": "Map of named STT configs. Each key is a config name; value contains apikey and an optional url override."
+      }
+    },
+    "description": "STT plugin config. Use select to set a default config name, and configs to define named STT provider entries."
+  }
+}

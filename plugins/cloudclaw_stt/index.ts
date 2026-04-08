@@ -17,8 +17,11 @@
  *     "entries": {
  *       "stt": {
  *         "config": {
- *           "openai": { "type": "openai", "apikey": "sk-..." },
- *           "my-provider": { "type": "aliyun", "apikey": "...", "model": "qwen-asr-flash" }
+ *           "select": "openai",
+ *           "configs": {
+ *             "openai": { "type": "openai", "apikey": "sk-..." },
+ *             "my-provider": { "type": "aliyun", "apikey": "...", "model": "qwen-asr-flash" }
+ *           }
  *         }
  *       }
  *     }
@@ -28,8 +31,8 @@
  */
 
 import axios from "axios";
-import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/core";
+import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 
 // Default STT endpoints per provider type.
 const DEFAULT_STT_URL_OPENAI = "https://api.openai.com/v1/audio/transcriptions";
@@ -64,18 +67,12 @@ function requireStringParam(
   return value.trim();
 }
 
-function optionalStringParam(
-  params: Record<string, unknown>,
-  key: string,
-): string | undefined {
+function optionalStringParam(params: Record<string, unknown>, key: string): string | undefined {
   const value = params[key];
   return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
 }
 
-function optionalBooleanParam(
-  params: Record<string, unknown>,
-  key: string,
-): boolean | undefined {
+function optionalBooleanParam(params: Record<string, unknown>, key: string): boolean | undefined {
   const value = params[key];
   return typeof value === "boolean" ? value : undefined;
 }
@@ -147,7 +144,7 @@ async function transcribeAudioAliyun(params: {
         content: [
           {
             type: "input_audio",
-            input_audio: {data:params.b64},
+            input_audio: { data: params.b64 },
           },
         ],
       },
@@ -177,22 +174,27 @@ async function transcribeAudioAliyun(params: {
 }
 
 export default definePluginEntry({
-  id: "stt",
+  id: "cloudclaw_stt",
   name: "STT Plugin",
   description: "Transcribes base64 audio and forwards the result to a session via stt.send",
   register(api: OpenClawPluginApi) {
     // Snapshot plugin config at registration time.
-    // Shape: Record<configName, SttChannelConfig>
+    // Shape: { select?: string; configs: Record<configName, SttChannelConfig> }
     const pluginConfig = (api.pluginConfig ?? {}) as Record<string, unknown>;
+    const pluginSelect =
+      typeof pluginConfig["select"] === "string" ? pluginConfig["select"].trim() : undefined;
+    const pluginConfigs = (
+      pluginConfig["configs"] != null && typeof pluginConfig["configs"] === "object"
+        ? pluginConfig["configs"]
+        : {}
+    ) as Record<string, unknown>;
 
     /**
      * Resolve the STT channel config by name.
      * Returns the config or an error message.
      */
-    function resolveChannelConfig(
-      configName: string,
-    ): SttChannelConfig | { error: string } {
-      const entry = pluginConfig[configName];
+    function resolveChannelConfig(configName: string): SttChannelConfig | { error: string } {
+      const entry = pluginConfigs[configName];
       if (!entry || typeof entry !== "object") {
         return { error: `No STT config found for configName "${configName}"` };
       }
@@ -212,12 +214,14 @@ export default definePluginEntry({
       return {
         type,
         apikey: cfg["apikey"].trim(),
-        url: typeof cfg["url"] === "string" && cfg["url"].trim() !== ""
-          ? cfg["url"].trim()
-          : defaultUrl,
-        model: typeof cfg["model"] === "string" && cfg["model"].trim() !== ""
-          ? cfg["model"].trim()
-          : defaultModel,
+        url:
+          typeof cfg["url"] === "string" && cfg["url"].trim() !== ""
+            ? cfg["url"].trim()
+            : defaultUrl,
+        model:
+          typeof cfg["model"] === "string" && cfg["model"].trim() !== ""
+            ? cfg["model"].trim()
+            : defaultModel,
       };
     }
 
@@ -228,7 +232,8 @@ export default definePluginEntry({
      *   sessionKey        string   (required) – target session key
      *   message           string   (required) – base64-encoded audio, optionally prefixed
      *                                           with `data:<mime>;base64,`
-     *   configName        string   (required) – key in plugins.entries.stt.config
+     *   configName        string   (optional) – key in plugins.entries.stt.config.configs;
+     *                                           defaults to plugins.entries.stt.config.select
      *   thinking          string   (optional) – thinking level, passed to subagent
      *   deliver           boolean  (optional) – deliver flag, passed to subagent
      *   idempotencyKey    string   (optional) – idempotency key for deduplication
@@ -250,15 +255,16 @@ export default definePluginEntry({
           respond(false, undefined, { code: "invalid_params", message: messageResult.error });
           return;
         }
-        const configNameResult = requireStringParam(params, "configName");
-        if (typeof configNameResult !== "string") {
-          respond(false, undefined, { code: "invalid_params", message: configNameResult.error });
-          return;
-        }
-
         const sessionKey = sessionKeyResult;
         const audioBase64 = messageResult;
-        const configName = configNameResult;
+        const configName = optionalStringParam(params, "configName") ?? pluginSelect;
+        if (!configName) {
+          respond(false, undefined, {
+            code: "invalid_params",
+            message: "configName is required when plugins.entries.stt.config.select is not set",
+          });
+          return;
+        }
 
         // Optional pass-through params (aligning with chat.send surface).
         const deliver = optionalBooleanParam(params, "deliver");
@@ -277,7 +283,9 @@ export default definePluginEntry({
         // Extract MIME from data URL prefix if present; use raw base64 for the API call.
         const dataUrlMatch = audioBase64.match(/^data:([^;]+);base64,/);
         const audioMime = dataUrlMatch ? dataUrlMatch[1]! : DEFAULT_AUDIO_MIME;
-        const audioB64 = dataUrlMatch ? audioBase64.slice(audioBase64.indexOf(",") + 1) : audioBase64;
+        const audioB64 = dataUrlMatch
+          ? audioBase64.slice(audioBase64.indexOf(",") + 1)
+          : audioBase64;
 
         // Validation and config resolution passed — acknowledge the request immediately.
         respond(true, { accepted: true });
@@ -312,7 +320,9 @@ export default definePluginEntry({
               "data" in err.response
                 ? ` | response: ${JSON.stringify((err.response as { data: unknown }).data)}`
                 : "";
-            api.logger.error(`stt.send: transcription failed [config=${configName}] ${msg}${responseData}`);
+            api.logger.error(
+              `stt.send: transcription failed [config=${configName}] ${msg}${responseData}`,
+            );
             // Forward the error to the session instead of replying on the WebSocket.
             try {
               await api.runtime.subagent.run({
@@ -324,8 +334,11 @@ export default definePluginEntry({
                 ...(model ? { model } : {}),
               });
             } catch (dispatchErr) {
-              const dispatchMsg = dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
-              api.logger.error(`stt.send: failed to deliver error to session [session=${sessionKey}] ${dispatchMsg}`);
+              const dispatchMsg =
+                dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr);
+              api.logger.error(
+                `stt.send: failed to deliver error to session [session=${sessionKey}] ${dispatchMsg}`,
+              );
             }
             return;
           }
