@@ -1,3 +1,5 @@
+import { defaultQaModelForMode, isQaFastModeEnabled } from "../../model-selection.js";
+import { formatErrorMessage } from "./errors.js";
 import {
   type Bootstrap,
   type OutcomesEnvelope,
@@ -11,6 +13,14 @@ import {
 
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(path);
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as T;
+}
+
+async function getJsonNoStore<T>(path: string): Promise<T> {
+  const response = await fetch(path, { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -34,18 +44,22 @@ function defaultModelsForProviderMode(
   mode: RunnerSelection["providerMode"],
   bootstrap?: Bootstrap | null,
 ): Pick<RunnerSelection, "primaryModel" | "alternateModel" | "fastMode"> {
-  if (mode === "live-openai") {
-    const preferred = bootstrap?.runnerCatalog.real[0]?.key;
+  const preferredLiveModel = bootstrap?.runnerCatalog.real[0]?.key;
+  if (mode === "live-frontier") {
+    const primaryModel = defaultQaModelForMode(mode, { preferredLiveModel });
+    const alternateModel = defaultQaModelForMode(mode, { alternate: true, preferredLiveModel });
     return {
-      primaryModel: preferred ?? "openai/gpt-5.4",
-      alternateModel: preferred ?? "openai/gpt-5.4",
-      fastMode: true,
+      primaryModel,
+      alternateModel,
+      fastMode: isQaFastModeEnabled({ primaryModel, alternateModel }),
     };
   }
+  const primaryModel = defaultQaModelForMode(mode);
+  const alternateModel = defaultQaModelForMode(mode, { alternate: true });
   return {
-    primaryModel: "mock-openai/gpt-5.4",
-    alternateModel: "mock-openai/gpt-5.4-alt",
-    fastMode: false,
+    primaryModel,
+    alternateModel,
+    fastMode: isQaFastModeEnabled({ primaryModel, alternateModel }),
   };
 }
 
@@ -85,6 +99,42 @@ export async function createQaLabApp(root: HTMLDivElement) {
   let chatScrollLocked = true;
   let previousMessageCount = 0;
 
+  /* ---------- Render guards (avoid DOM churn during polling) ---------- */
+
+  let lastFingerprint = "";
+  let renderDeferred = false;
+  let previousRunnerStatus: string | null = null;
+  let currentUiVersion: string | null = null;
+
+  function stateFingerprint(): string {
+    const msgs = state.snapshot?.messages;
+    const ev = state.snapshot?.events;
+    return JSON.stringify({
+      mc: msgs?.length ?? 0,
+      lm: msgs && msgs.length > 0 ? msgs[msgs.length - 1].id : null,
+      cc: state.snapshot?.conversations.length ?? 0,
+      tc: state.snapshot?.threads.length ?? 0,
+      ec: ev?.length ?? 0,
+      lc: ev && ev.length > 0 ? ev[ev.length - 1].cursor : -1,
+      rs: state.bootstrap?.runner.status,
+      ra: state.bootstrap?.runner.startedAt,
+      rf: state.bootstrap?.runner.finishedAt,
+      re: state.bootstrap?.runner.error,
+      ss: state.scenarioRun?.status,
+      sc: state.scenarioRun?.counts,
+      so: state.scenarioRun?.scenarios.map((o) => o.status).join(","),
+      rp: state.latestReport?.generatedAt,
+      cs: state.bootstrap?.runnerCatalog.status,
+      cl: state.bootstrap?.runnerCatalog.real.length ?? 0,
+      er: state.error,
+    });
+  }
+
+  function isSelectOpen(): boolean {
+    const active = document.activeElement;
+    return !!active && root.contains(active) && active.tagName === "SELECT";
+  }
+
   /* ---------- Data fetching ---------- */
 
   async function refresh() {
@@ -123,9 +173,45 @@ export async function createQaLabApp(root: HTMLDivElement) {
       }
       state.error = null;
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = formatErrorMessage(error);
     }
-    render();
+
+    /* Auto-switch to chat when a run starts so user can watch live */
+    const currentRunnerStatus = state.bootstrap?.runner.status ?? null;
+    if (currentRunnerStatus === "running" && previousRunnerStatus !== "running") {
+      state.activeTab = "chat";
+      chatScrollLocked = true;
+    }
+    previousRunnerStatus = currentRunnerStatus;
+
+    /* Only re-render when data actually changed; defer if a <select> is open */
+    const fp = stateFingerprint();
+    if (fp !== lastFingerprint) {
+      lastFingerprint = fp;
+      renderDeferred = true;
+    }
+    if (renderDeferred && !isSelectOpen()) {
+      renderDeferred = false;
+      render();
+    }
+  }
+
+  async function pollUiVersion() {
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+    try {
+      const payload = await getJsonNoStore<{ version: string | null }>("/api/ui-version");
+      if (!currentUiVersion) {
+        currentUiVersion = payload.version;
+        return;
+      }
+      if (payload.version && payload.version !== currentUiVersion) {
+        window.location.reload();
+      }
+    } catch {
+      // Ignore transient rebuild windows while the dist dir is being rewritten.
+    }
   }
 
   /* ---------- Draft mutations ---------- */
@@ -162,7 +248,7 @@ export async function createQaLabApp(root: HTMLDivElement) {
       state.activeTab = "report";
       await refresh();
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = formatErrorMessage(error);
       render();
     } finally {
       state.busy = false;
@@ -179,7 +265,7 @@ export async function createQaLabApp(root: HTMLDivElement) {
       state.selectedThreadId = null;
       await refresh();
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = formatErrorMessage(error);
       render();
     } finally {
       state.busy = false;
@@ -215,7 +301,7 @@ export async function createQaLabApp(root: HTMLDivElement) {
       chatScrollLocked = true;
       await refresh();
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = formatErrorMessage(error);
       render();
     } finally {
       state.busy = false;
@@ -239,7 +325,6 @@ export async function createQaLabApp(root: HTMLDivElement) {
           providerMode: state.runnerDraft.providerMode,
           primaryModel: state.runnerDraft.primaryModel,
           alternateModel: state.runnerDraft.alternateModel,
-          fastMode: state.runnerDraft.fastMode,
           scenarioIds: state.runnerDraft.scenarioIds,
         },
       );
@@ -251,7 +336,7 @@ export async function createQaLabApp(root: HTMLDivElement) {
       state.activeTab = "chat";
       await refresh();
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = formatErrorMessage(error);
       render();
     } finally {
       state.busy = false;
@@ -269,7 +354,7 @@ export async function createQaLabApp(root: HTMLDivElement) {
       chatScrollLocked = true;
       await refresh();
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = formatErrorMessage(error);
       render();
     } finally {
       state.busy = false;
@@ -441,8 +526,8 @@ export async function createQaLabApp(root: HTMLDivElement) {
     /* Config form */
     root.querySelector<HTMLSelectElement>("#provider-mode")?.addEventListener("change", (e) => {
       const mode =
-        (e.currentTarget as HTMLSelectElement).value === "live-openai"
-          ? "live-openai"
+        (e.currentTarget as HTMLSelectElement).value === "live-frontier"
+          ? "live-frontier"
           : "mock-openai";
       updateRunnerDraft((d) => ({
         ...d,
@@ -450,19 +535,20 @@ export async function createQaLabApp(root: HTMLDivElement) {
         ...defaultModelsForProviderMode(mode, state.bootstrap),
       }));
     });
-    root.querySelector<HTMLInputElement>("#fast-mode")?.addEventListener("change", (e) => {
-      updateRunnerDraft((d) => ({ ...d, fastMode: (e.currentTarget as HTMLInputElement).checked }));
-    });
-    root.querySelector<HTMLElement>("#primary-model")?.addEventListener("input", (e) => {
+    root.querySelector<HTMLSelectElement>("#primary-model")?.addEventListener("change", (e) => {
+      const primaryModel = (e.currentTarget as HTMLSelectElement).value;
       updateRunnerDraft((d) => ({
         ...d,
-        primaryModel: (e.currentTarget as HTMLInputElement).value,
+        primaryModel,
+        fastMode: isQaFastModeEnabled({ primaryModel, alternateModel: d.alternateModel }),
       }));
     });
-    root.querySelector<HTMLElement>("#alternate-model")?.addEventListener("input", (e) => {
+    root.querySelector<HTMLSelectElement>("#alternate-model")?.addEventListener("change", (e) => {
+      const alternateModel = (e.currentTarget as HTMLSelectElement).value;
       updateRunnerDraft((d) => ({
         ...d,
-        alternateModel: (e.currentTarget as HTMLInputElement).value,
+        alternateModel,
+        fastMode: isQaFastModeEnabled({ primaryModel: d.primaryModel, alternateModel }),
       }));
     });
 
@@ -536,5 +622,7 @@ export async function createQaLabApp(root: HTMLDivElement) {
 
   render();
   await refresh();
+  void pollUiVersion();
   setInterval(() => void refresh(), 1_000);
+  setInterval(() => void pollUiVersion(), 1_000);
 }

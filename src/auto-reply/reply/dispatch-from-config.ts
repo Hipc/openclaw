@@ -20,6 +20,7 @@ import {
   toPluginMessageReceivedEvent,
 } from "../../hooks/message-hook-mappers.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import { formatErrorMessage } from "../../infra/errors.js";
 import {
   logMessageProcessed,
   logMessageQueued,
@@ -36,6 +37,11 @@ import {
 } from "../../plugins/conversation-binding.js";
 import { getGlobalHookRunner, getGlobalPluginRegistry } from "../../plugins/hook-runner-global.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
+import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
+import {
+  normalizeOptionalLowercaseString,
+  normalizeOptionalString,
+} from "../../shared/string-coerce.js";
 import { normalizeTtsAutoMode, resolveConfiguredTtsMode } from "../../tts/tts-config.js";
 import { normalizeMessageChannel } from "../../utils/message-channel.js";
 import type { FinalizedMsgContext } from "../templating.js";
@@ -94,7 +100,8 @@ async function maybeApplyTtsToReplyPayload(
 
 const AUDIO_PLACEHOLDER_RE = /^<media:audio>(\s*\([^)]*\))?$/i;
 const AUDIO_HEADER_RE = /^\[Audio\b/i;
-const normalizeMediaType = (value: string): string => value.split(";")[0]?.trim().toLowerCase();
+const normalizeMediaType = (value: string): string =>
+  normalizeOptionalLowercaseString(value.split(";")[0]) ?? "";
 
 const isInboundAudioContext = (ctx: FinalizedMsgContext): boolean => {
   const rawTypes = [
@@ -135,8 +142,10 @@ const resolveSessionStoreLookup = (
   entry?: SessionEntry;
 } => {
   const targetSessionKey =
-    ctx.CommandSource === "native" ? ctx.CommandTargetSessionKey?.trim() : undefined;
-  const sessionKey = (targetSessionKey ?? ctx.SessionKey)?.trim();
+    ctx.CommandSource === "native"
+      ? normalizeOptionalString(ctx.CommandTargetSessionKey)
+      : undefined;
+  const sessionKey = normalizeOptionalString(targetSessionKey ?? ctx.SessionKey);
   if (!sessionKey) {
     return {};
   }
@@ -197,7 +206,7 @@ export async function dispatchReplyFromConfig(params: {
 }): Promise<DispatchFromConfigResult> {
   const { ctx, cfg, dispatcher } = params;
   const diagnosticsEnabled = isDiagnosticsEnabled(cfg);
-  const channel = String(ctx.Surface ?? ctx.Provider ?? "unknown").toLowerCase();
+  const channel = normalizeLowercaseStringOrEmpty(String(ctx.Surface ?? ctx.Provider ?? "unknown"));
   const chatId = ctx.To ?? ctx.From;
   const messageId = ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast;
   const sessionKey = ctx.SessionKey;
@@ -342,6 +351,10 @@ export async function dispatchReplyFromConfig(params: {
       to: originatingTo,
       sessionKey: ctx.SessionKey,
       accountId: ctx.AccountId,
+      requesterSenderId: ctx.SenderId,
+      requesterSenderName: ctx.SenderName,
+      requesterSenderUsername: ctx.SenderUsername,
+      requesterSenderE164: ctx.SenderE164,
       threadId: routeThreadId,
       cfg,
       abortSignal,
@@ -365,6 +378,10 @@ export async function dispatchReplyFromConfig(params: {
         to: originatingTo,
         sessionKey: ctx.SessionKey,
         accountId: ctx.AccountId,
+        requesterSenderId: ctx.SenderId,
+        requesterSenderName: ctx.SenderName,
+        requesterSenderUsername: ctx.SenderUsername,
+        requesterSenderE164: ctx.SenderE164,
         threadId: routeThreadId,
         cfg,
         isGroup,
@@ -521,6 +538,10 @@ export async function dispatchReplyFromConfig(params: {
           to: originatingTo,
           sessionKey: ctx.SessionKey,
           accountId: ctx.AccountId,
+          requesterSenderId: ctx.SenderId,
+          requesterSenderName: ctx.SenderName,
+          requesterSenderUsername: ctx.SenderUsername,
+          requesterSenderE164: ctx.SenderE164,
           threadId: routeThreadId,
           cfg,
           isGroup,
@@ -578,6 +599,10 @@ export async function dispatchReplyFromConfig(params: {
           to: originatingTo,
           sessionKey: ctx.SessionKey,
           accountId: ctx.AccountId,
+          requesterSenderId: ctx.SenderId,
+          requesterSenderName: ctx.SenderName,
+          requesterSenderUsername: ctx.SenderUsername,
+          requesterSenderE164: ctx.SenderE164,
           threadId: routeThreadId,
           cfg,
           isGroup,
@@ -702,7 +727,7 @@ export async function dispatchReplyFromConfig(params: {
       }
       return parts.join("\n\n").trim() || "Planning next steps.";
     };
-    const maybeSendWorkingStatus = (label: string) => {
+    const maybeSendWorkingStatus = async (label: string): Promise<void> => {
       const normalizedLabel = normalizeWorkingLabel(label);
       if (
         !shouldEmitVerboseProgress() ||
@@ -719,11 +744,15 @@ export async function dispatchReplyFromConfig(params: {
         text: `Working: ${normalizedLabel}`,
       };
       if (shouldRouteToOriginating) {
-        return sendPayloadAsync(payload, undefined, false);
+        await sendPayloadAsync(payload, undefined, false);
+        return;
       }
       dispatcher.sendToolResult(payload);
     };
-    const sendPlanUpdate = (payload: { explanation?: string; steps?: string[] }) => {
+    const sendPlanUpdate = async (payload: {
+      explanation?: string;
+      steps?: string[];
+    }): Promise<void> => {
       if (!shouldEmitVerboseProgress()) {
         return;
       }
@@ -731,7 +760,8 @@ export async function dispatchReplyFromConfig(params: {
         text: formatPlanUpdateText(payload),
       };
       if (shouldRouteToOriginating) {
-        return sendPayloadAsync(replyPayload, undefined, false);
+        await sendPayloadAsync(replyPayload, undefined, false);
+        return;
       }
       dispatcher.sendToolResult(replyPayload);
     };
@@ -741,25 +771,29 @@ export async function dispatchReplyFromConfig(params: {
       message?: string;
     }) => {
       if (payload.status === "pending") {
-        if (payload.command?.trim()) {
-          return normalizeWorkingLabel(`awaiting approval: ${payload.command}`);
+        const command = normalizeOptionalString(payload.command);
+        if (command) {
+          return normalizeWorkingLabel(`awaiting approval: ${command}`);
         }
         return "awaiting approval";
       }
       if (payload.status === "unavailable") {
-        if (payload.message?.trim()) {
-          return normalizeWorkingLabel(payload.message);
+        const message = normalizeOptionalString(payload.message);
+        if (message) {
+          return normalizeWorkingLabel(message);
         }
         return "approval unavailable";
       }
       return "";
     };
     const summarizePatchLabel = (payload: { summary?: string; title?: string }) => {
-      if (payload.summary?.trim()) {
-        return normalizeWorkingLabel(payload.summary);
+      const summary = normalizeOptionalString(payload.summary);
+      if (summary) {
+        return normalizeWorkingLabel(summary);
       }
-      if (payload.title?.trim()) {
-        return normalizeWorkingLabel(payload.title);
+      const title = normalizeOptionalString(payload.title);
+      if (title) {
+        return normalizeWorkingLabel(title);
       }
       return "";
     };
@@ -837,13 +871,13 @@ export async function dispatchReplyFromConfig(params: {
           };
           return run();
         },
-        onPlanUpdate: ({ phase, explanation, steps }) => {
+        onPlanUpdate: async ({ phase, explanation, steps }) => {
           if (phase !== "update") {
             return;
           }
-          return sendPlanUpdate({ explanation, steps });
+          await sendPlanUpdate({ explanation, steps });
         },
-        onApprovalEvent: ({ phase, status, command, message }) => {
+        onApprovalEvent: async ({ phase, status, command, message }) => {
           if (phase !== "requested") {
             return;
           }
@@ -851,9 +885,9 @@ export async function dispatchReplyFromConfig(params: {
           if (!label) {
             return;
           }
-          return maybeSendWorkingStatus(label);
+          await maybeSendWorkingStatus(label);
         },
-        onPatchSummary: ({ phase, summary, title }) => {
+        onPatchSummary: async ({ phase, summary, title }) => {
           if (phase !== "end") {
             return;
           }
@@ -861,7 +895,7 @@ export async function dispatchReplyFromConfig(params: {
           if (!label) {
             return;
           }
-          return maybeSendWorkingStatus(label);
+          await maybeSendWorkingStatus(label);
         },
         onBlockReply: (payload: ReplyPayload, context?: BlockReplyContext) => {
           const run = async () => {
@@ -999,6 +1033,10 @@ export async function dispatchReplyFromConfig(params: {
               to: originatingTo,
               sessionKey: ctx.SessionKey,
               accountId: ctx.AccountId,
+              requesterSenderId: ctx.SenderId,
+              requesterSenderName: ctx.SenderName,
+              requesterSenderUsername: ctx.SenderUsername,
+              requesterSenderE164: ctx.SenderE164,
               threadId: routeThreadId,
               cfg,
               isGroup,
@@ -1020,7 +1058,7 @@ export async function dispatchReplyFromConfig(params: {
         }
       } catch (err) {
         logVerbose(
-          `dispatch-from-config: accumulated block TTS failed: ${err instanceof Error ? err.message : String(err)}`,
+          `dispatch-from-config: accumulated block TTS failed: ${formatErrorMessage(err)}`,
         );
       }
     }

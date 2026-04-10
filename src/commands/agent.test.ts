@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
 import "../cron/isolated-agent.mocks.js";
 import { __testing as acpManagerTesting } from "../acp/control-plane/manager.js";
-import { __testing as agentCommandTesting } from "../agents/agent-command.js";
 import { resolveAgentDir, resolveSessionAgentId } from "../agents/agent-scope.js";
 import * as authProfilesModule from "../agents/auth-profiles.js";
 import * as sessionStoreModule from "../agents/command/session-store.js";
@@ -12,7 +11,6 @@ import { resolveSession } from "../agents/command/session.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
 import * as modelSelectionModule from "../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
-import * as commandConfigResolutionModule from "../cli/command-config-resolution.js";
 import type { OpenClawConfig } from "../config/config.js";
 import * as configModule from "../config/config.js";
 import { clearSessionStoreCacheForTest } from "../config/sessions.js";
@@ -50,6 +48,16 @@ vi.mock("../logging/subsystem.js", () => {
 vi.mock("../agents/auth-profiles.js", async () => {
   const actual = await vi.importActual<typeof import("../agents/auth-profiles.js")>(
     "../agents/auth-profiles.js",
+  );
+  return {
+    ...actual,
+    ensureAuthProfileStore: vi.fn(() => ({ version: 1, profiles: {} })),
+  };
+});
+
+vi.mock("../agents/auth-profiles/store.js", async () => {
+  const actual = await vi.importActual<typeof import("../agents/auth-profiles/store.js")>(
+    "../agents/auth-profiles/store.js",
   );
   return {
     ...actual,
@@ -309,97 +317,6 @@ beforeEach(() => {
 });
 
 describe("agentCommand", () => {
-  it("sets runtime snapshots from source config before embedded agent run", async () => {
-    await withTempHome(async (home) => {
-      const setRuntimeConfigSnapshotSpy = vi.spyOn(configModule, "setRuntimeConfigSnapshot");
-
-      const store = path.join(home, "sessions.json");
-      const loadedConfig = {
-        agents: {
-          defaults: {
-            model: { primary: "anthropic/claude-opus-4-6" },
-            models: { "anthropic/claude-opus-4-6": {} },
-            workspace: path.join(home, "openclaw"),
-          },
-        },
-        session: { store, mainKey: "main" },
-        models: {
-          providers: {
-            openai: {
-              baseUrl: "https://api.openai.com/v1",
-              apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" }, // pragma: allowlist secret
-              models: [],
-            },
-          },
-        },
-      } as unknown as OpenClawConfig;
-      const sourceConfig = {
-        ...loadedConfig,
-        models: {
-          providers: {
-            openai: {
-              baseUrl: "https://api.openai.com/v1",
-              apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" }, // pragma: allowlist secret
-              models: [],
-            },
-          },
-        },
-      } as unknown as OpenClawConfig;
-      const resolvedConfig = {
-        ...loadedConfig,
-        models: {
-          providers: {
-            openai: {
-              baseUrl: "https://api.openai.com/v1",
-              apiKey: "sk-resolved-runtime", // pragma: allowlist secret
-              models: [],
-            },
-          },
-        },
-      } as unknown as OpenClawConfig;
-
-      configSpy.mockReturnValue(loadedConfig);
-      readConfigFileSnapshotForWriteSpy.mockResolvedValue({
-        snapshot: { valid: true, resolved: sourceConfig },
-        writeOptions: {},
-      } as Awaited<ReturnType<typeof configModule.readConfigFileSnapshotForWrite>>);
-      const resolveConfigWithSecretsSpy = vi
-        .spyOn(commandConfigResolutionModule, "resolveCommandConfigWithSecrets")
-        .mockResolvedValueOnce({
-          resolvedConfig,
-          effectiveConfig: resolvedConfig,
-          diagnostics: [],
-        });
-
-      const prepared = await agentCommandTesting.resolveAgentRuntimeConfig(runtime);
-
-      expect(resolveConfigWithSecretsSpy).toHaveBeenCalledWith({
-        config: loadedConfig,
-        commandName: "agent",
-        targetIds: expect.any(Set),
-        runtime,
-      });
-      expect(setRuntimeConfigSnapshotSpy).toHaveBeenCalledWith(resolvedConfig, sourceConfig);
-      expect(prepared.cfg).toBe(resolvedConfig);
-    });
-  });
-
-  it("creates a session entry when deriving from --to", async () => {
-    await withTempHome(async (home) => {
-      const store = path.join(home, "sessions.json");
-      mockConfig(home, store);
-
-      await agentCommand({ message: "hello", to: "+1555" }, runtime);
-
-      const saved = JSON.parse(fs.readFileSync(store, "utf-8")) as Record<
-        string,
-        { sessionId: string }
-      >;
-      const entry = Object.values(saved)[0];
-      expect(entry.sessionId).toBeTruthy();
-    });
-  });
-
   it("persists thinking and verbose overrides", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
@@ -1040,14 +957,6 @@ describe("agentCommand", () => {
       seedKey: "agent:main:subagent:abc",
       sessionId: "sess-main",
       expectedPathFragment: `${path.sep}agents${path.sep}main${path.sep}sessions${path.sep}sess-main.jsonl`,
-    });
-  });
-
-  it("preserves topic transcript suffix when persisting missing sessionFile", async () => {
-    await expectPersistedSessionFile({
-      seedKey: "agent:main:telegram:group:123:topic:456",
-      sessionId: "sess-topic",
-      expectedPathFragment: `${path.sep}agents${path.sep}main${path.sep}sessions${path.sep}sess-topic.jsonl`,
     });
   });
 

@@ -22,6 +22,7 @@ function scopeRank(scope: typeof pluginRegistryLoaded): number {
     case "all":
       return 3;
   }
+  throw new Error("Unsupported plugin registry scope");
 }
 
 function activeRegistrySatisfiesScope(
@@ -50,6 +51,7 @@ function activeRegistrySatisfiesScope(
     case "all":
       return false;
   }
+  throw new Error("Unsupported plugin registry scope");
 }
 
 export function ensurePluginRegistryLoaded(options?: {
@@ -63,9 +65,6 @@ export function ensurePluginRegistryLoaded(options?: {
   const requestedPluginIds =
     options?.onlyPluginIds?.map((pluginId) => pluginId.trim()).filter(Boolean) ?? [];
   const scopedLoad = requestedPluginIds.length > 0;
-  if (!scopedLoad && scopeRank(pluginRegistryLoaded) >= scopeRank(scope)) {
-    return;
-  }
   const context = resolvePluginRuntimeLoadContext(options);
   const expectedChannelPluginIds = scopedLoad
     ? requestedPluginIds
@@ -83,6 +82,13 @@ export function ensurePluginRegistryLoaded(options?: {
           })
         : [];
   const active = getActivePluginRegistry();
+  if (
+    !scopedLoad &&
+    scopeRank(pluginRegistryLoaded) >= scopeRank(scope) &&
+    activeRegistrySatisfiesScope(scope, active, expectedChannelPluginIds, expectedChannelPluginIds)
+  ) {
+    return;
+  }
   if (
     (pluginRegistryLoaded === "none" || scopedLoad) &&
     activeRegistrySatisfiesScope(scope, active, expectedChannelPluginIds, expectedChannelPluginIds)

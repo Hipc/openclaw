@@ -4,7 +4,12 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { MsgContext } from "../templating.js";
-import { markCompleteReplyConfig } from "./get-reply-fast-path.js";
+import {
+  initFastReplySessionState,
+  markCompleteReplyConfig,
+  withFastReplyConfig,
+} from "./get-reply-fast-path.js";
+import { loadGetReplyModuleForTest } from "./get-reply.test-loader.js";
 import "./get-reply.test-runtime-mocks.js";
 
 const mocks = vi.hoisted(() => ({
@@ -43,11 +48,12 @@ vi.mock("./session.js", async (importOriginal) => {
 
 let getReplyFromConfig: typeof import("./get-reply.js").getReplyFromConfig;
 let loadConfigMock: typeof import("../../config/config.js").loadConfig;
+let runPreparedReplyMock: typeof import("./get-reply-run.js").runPreparedReply;
 
-async function loadFreshGetReplyModuleForTest() {
-  vi.resetModules();
-  ({ getReplyFromConfig } = await import("./get-reply.js"));
+async function loadGetReplyRuntimeForTest() {
+  ({ getReplyFromConfig } = await loadGetReplyModuleForTest({ cacheKey: import.meta.url }));
   ({ loadConfig: loadConfigMock } = await import("../../config/config.js"));
+  ({ runPreparedReply: runPreparedReplyMock } = await import("./get-reply-run.js"));
 }
 
 function buildCtx(overrides: Partial<MsgContext> = {}): MsgContext {
@@ -69,14 +75,16 @@ function buildCtx(overrides: Partial<MsgContext> = {}): MsgContext {
 
 describe("getReplyFromConfig fast test bootstrap", () => {
   beforeEach(async () => {
-    await loadFreshGetReplyModuleForTest();
+    await loadGetReplyRuntimeForTest();
     vi.stubEnv("OPENCLAW_TEST_FAST", "1");
     mocks.ensureAgentWorkspace.mockReset();
     mocks.initSessionState.mockReset();
     mocks.resolveReplyDirectives.mockReset();
     vi.mocked(loadConfigMock).mockReset();
+    vi.mocked(runPreparedReplyMock).mockReset();
     vi.mocked(loadConfigMock).mockReturnValue({});
     mocks.resolveReplyDirectives.mockResolvedValue({ kind: "reply", reply: { text: "ok" } });
+    vi.mocked(runPreparedReplyMock).mockResolvedValue({ text: "ok" });
     mocks.initSessionState.mockResolvedValue({
       sessionCtx: {},
       sessionEntry: {},
@@ -101,6 +109,13 @@ describe("getReplyFromConfig fast test bootstrap", () => {
     vi.unstubAllEnvs();
   });
 
+  it("fails fast on unmarked config overrides in strict fast-test mode", async () => {
+    await expect(getReplyFromConfig(buildCtx(), undefined, {} as OpenClawConfig)).rejects.toThrow(
+      /withFastReplyConfig\(\)\/markCompleteReplyConfig\(\)/,
+    );
+    expect(vi.mocked(loadConfigMock)).not.toHaveBeenCalled();
+  });
+
   it("skips loadConfig, workspace bootstrap, and session bootstrap for marked test configs", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-fast-reply-"));
     const cfg = markCompleteReplyConfig({
@@ -118,7 +133,8 @@ describe("getReplyFromConfig fast test bootstrap", () => {
     expect(vi.mocked(loadConfigMock)).not.toHaveBeenCalled();
     expect(mocks.ensureAgentWorkspace).not.toHaveBeenCalled();
     expect(mocks.initSessionState).not.toHaveBeenCalled();
-    expect(mocks.resolveReplyDirectives).toHaveBeenCalledWith(
+    expect(mocks.resolveReplyDirectives).not.toHaveBeenCalled();
+    expect(vi.mocked(runPreparedReplyMock)).toHaveBeenCalledWith(
       expect.objectContaining({
         cfg,
       }),
@@ -126,6 +142,7 @@ describe("getReplyFromConfig fast test bootstrap", () => {
   });
 
   it("still merges partial config overrides against loadConfig()", async () => {
+    vi.stubEnv("OPENCLAW_ALLOW_SLOW_REPLY_TESTS", "1");
     vi.mocked(loadConfigMock).mockReturnValue({
       channels: {
         telegram: {
@@ -160,5 +177,31 @@ describe("getReplyFromConfig fast test bootstrap", () => {
         }),
       }),
     );
+  });
+
+  it("marks configs through withFastReplyConfig()", async () => {
+    const cfg = withFastReplyConfig({ session: { store: "/tmp/sessions.json" } } as OpenClawConfig);
+
+    await expect(getReplyFromConfig(buildCtx(), undefined, cfg)).resolves.toEqual({ text: "ok" });
+    expect(vi.mocked(loadConfigMock)).not.toHaveBeenCalled();
+    expect(mocks.resolveReplyDirectives).not.toHaveBeenCalled();
+    expect(vi.mocked(runPreparedReplyMock)).toHaveBeenCalledOnce();
+  });
+
+  it("uses native command target session keys during fast bootstrap", () => {
+    const result = initFastReplySessionState({
+      ctx: buildCtx({
+        SessionKey: "telegram:slash:123",
+        CommandSource: "native",
+        CommandTargetSessionKey: "agent:main:main",
+      }),
+      cfg: { session: { store: "/tmp/sessions.json" } } as OpenClawConfig,
+      agentId: "main",
+      commandAuthorized: true,
+      workspaceDir: "/tmp/workspace",
+    });
+
+    expect(result.sessionKey).toBe("agent:main:main");
+    expect(result.sessionCtx.SessionKey).toBe("agent:main:main");
   });
 });
