@@ -232,6 +232,7 @@ async function writeLiveGatewayConfig(params: {
     agents: {
       defaults: {
         workspace: params.workspace,
+        embeddedHarness: { runtime: "codex", fallback: "none" },
         skipBootstrap: true,
         model: { primary: params.modelKey },
         models: { [params.modelKey]: {} },
@@ -265,6 +266,40 @@ async function requestAgentText(params: {
   }
   const text = extractPayloadText(payload.result);
   expect(text).toContain(params.expectedToken);
+  return text;
+}
+
+async function requestCodexCommandText(params: {
+  client: GatewayClient;
+  command: string;
+  expectedText: string | string[];
+  sessionKey: string;
+}): Promise<string> {
+  const { extractPayloadText } = await import("./test-helpers.agent-results.js");
+  const payload = await params.client.request(
+    "agent",
+    {
+      sessionKey: params.sessionKey,
+      idempotencyKey: `idem-${randomUUID()}-codex-command`,
+      message: params.command,
+      deliver: false,
+      thinking: "low",
+    },
+    { expectFinal: true },
+  );
+  if (payload?.status !== "ok") {
+    throw new Error(
+      `codex command ${params.command} failed: status=${String(payload?.status)} payload=${JSON.stringify(payload)}`,
+    );
+  }
+  const text = extractPayloadText(payload.result);
+  const expectedTexts = Array.isArray(params.expectedText)
+    ? params.expectedText
+    : [params.expectedText];
+  expect(
+    expectedTexts.some((expectedText) => text.includes(expectedText)),
+    `Expected "${params.command}" response to contain one of: ${expectedTexts.join(", ")}\nReceived:\n${text}`,
+  ).toBe(true);
   return text;
 }
 
@@ -393,6 +428,7 @@ describeLive("gateway live (Codex harness)", () => {
 
       clearRuntimeConfigSnapshot();
       process.env.OPENCLAW_AGENT_RUNTIME = "codex";
+      process.env.OPENCLAW_AGENT_HARNESS_FALLBACK = "none";
       process.env.OPENCLAW_CONFIG_PATH = configPath;
       process.env.OPENCLAW_GATEWAY_TOKEN = token;
       process.env.OPENCLAW_SKIP_BROWSER_CONTROL_SERVER = "1";
@@ -440,6 +476,44 @@ describeLive("gateway live (Codex harness)", () => {
           message: `Reply with exactly ${secondToken} and nothing else. Do not repeat ${firstToken}.`,
         });
         logCodexLiveStep("second-turn", { secondText });
+
+        const statusText = await requestCodexCommandText({
+          client,
+          sessionKey,
+          command: "/codex status",
+          expectedText: [
+            "Codex app-server:",
+            "Model: `codex/",
+            "Model: codex/",
+            "Session: `agent:dev:live-codex-harness`",
+            "Session: agent:dev:live-codex-harness",
+            "OpenClaw `",
+            "OpenClaw status:",
+            "model `codex/",
+            "session `agent:dev:live-codex-harness`",
+            "Model/status card shown above",
+          ],
+        });
+        logCodexLiveStep("codex-status-command", { statusText });
+
+        const modelsText = await requestCodexCommandText({
+          client,
+          sessionKey,
+          command: "/codex models",
+          expectedText: [
+            "Codex models:",
+            "Available Codex models",
+            "Available agent target:",
+            "Available agent targets:",
+            "opened an interactive trust prompt",
+            "running as Codex on `codex/",
+            "currently running on `codex/",
+            "stdin is not a terminal",
+            "Configured model from `~/.codex/config.toml`:",
+            "Current OpenClaw session status reports the active model as:",
+          ],
+        });
+        logCodexLiveStep("codex-models-command", { modelsText });
 
         if (CODEX_HARNESS_IMAGE_PROBE) {
           logCodexLiveStep("image-probe:start", { sessionKey });

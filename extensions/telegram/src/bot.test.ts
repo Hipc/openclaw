@@ -5,6 +5,7 @@ import {
   registerPluginInteractiveHandler,
 } from "openclaw/plugin-sdk/plugin-runtime";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mockPinnedHostnameResolution } from "../../../src/test-helpers/ssrf.js";
 import type { TelegramInteractiveHandlerContext } from "./interactive-dispatch.js";
 const {
   answerCallbackQuerySpy,
@@ -15,6 +16,7 @@ const {
   getFileSpy,
   getChatSpy,
   getLoadConfigMock,
+  getLoadWebMediaMock,
   getReadChannelAllowFromStoreMock,
   getOnHandler,
   listSkillCommandsForAgents,
@@ -36,9 +38,9 @@ let createTelegramBot: (
 ) => ReturnType<typeof import("./bot.js").createTelegramBot>;
 
 const loadConfig = getLoadConfigMock();
+const loadWebMedia = getLoadWebMediaMock();
 const readChannelAllowFromStore = getReadChannelAllowFromStoreMock();
 const PUZZLE_EMOJI = "\u{1F9E9}";
-const CROSS_MARK_EMOJI = "\u{274C}";
 const INFO_EMOJI = "\u{2139}\u{FE0F}";
 const CHECK_MARK_EMOJI = "\u{2705}";
 const THUMBS_UP_EMOJI = "\u{1F44D}";
@@ -498,9 +500,10 @@ describe("createTelegramBot", () => {
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-approve-blocked");
   });
 
-  it("does not leak raw approval callback errors back into Telegram chat", async () => {
+  it("keeps approval callback resolution failures out of Telegram chat before retry", async () => {
     onSpy.mockClear();
     sendMessageSpy.mockClear();
+    editMessageReplyMarkupSpy.mockClear();
     resolveExecApprovalSpy.mockClear();
     resolveExecApprovalSpy.mockRejectedValueOnce(new Error("gateway secret detail"));
 
@@ -522,26 +525,27 @@ describe("createTelegramBot", () => {
       ctx: Record<string, unknown>,
     ) => Promise<void>;
 
-    await callbackHandler({
-      callbackQuery: {
-        id: "cbq-approve-error",
-        data: "/approve 138e9b8c allow-once",
-        from: { id: 9, first_name: "Ada", username: "ada_bot" },
-        message: {
-          chat: { id: 1234, type: "private" },
-          date: 1736380800,
-          message_id: 25,
-          text: "Approval required.",
+    await expect(
+      callbackHandler({
+        callbackQuery: {
+          id: "cbq-approve-error",
+          data: "/approve 138e9b8c allow-once",
+          from: { id: 9, first_name: "Ada", username: "ada_bot" },
+          message: {
+            chat: { id: 1234, type: "private" },
+            date: 1736380800,
+            message_id: 25,
+            text: "Approval required.",
+          },
         },
-      },
-      me: { username: "openclaw_bot" },
-      getFile: async () => ({ download: async () => new Uint8Array() }),
-    });
+        me: { username: "openclaw_bot" },
+        getFile: async () => ({ download: async () => new Uint8Array() }),
+      }),
+    ).rejects.toThrow("gateway secret detail");
 
-    expect(sendMessageSpy).toHaveBeenCalledTimes(1);
-    expect(sendMessageSpy.mock.calls[0]?.[1]).toBe(
-      `${CROSS_MARK_EMOJI} Failed to submit approval. Please try again or contact an admin.`,
-    );
+    expect(sendMessageSpy).not.toHaveBeenCalled();
+    expect(editMessageReplyMarkupSpy).not.toHaveBeenCalled();
+    expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-approve-error");
   });
 
   it("allows exec approval callbacks from target-only Telegram recipients", async () => {
@@ -605,12 +609,13 @@ describe("createTelegramBot", () => {
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-approve-target");
   });
 
-  it("does not allow target-only recipients to use legacy plugin fallback ids", async () => {
+  it("keeps legacy plugin fallback approval failures retryable for target-only recipients", async () => {
     onSpy.mockClear();
     editMessageReplyMarkupSpy.mockClear();
     editMessageTextSpy.mockClear();
     resolveExecApprovalSpy.mockClear();
     replySpy.mockClear();
+    sendMessageSpy.mockClear();
     resolveExecApprovalSpy.mockRejectedValueOnce(new Error("unknown or expired approval id"));
 
     loadConfig.mockReturnValue({
@@ -634,21 +639,23 @@ describe("createTelegramBot", () => {
     ) => Promise<void>;
     expect(callbackHandler).toBeDefined();
 
-    await callbackHandler({
-      callbackQuery: {
-        id: "cbq-legacy-plugin-fallback-blocked",
-        data: "/approve 138e9b8c allow-once",
-        from: { id: 9, first_name: "Ada", username: "ada_bot" },
-        message: {
-          chat: { id: 1234, type: "private" },
-          date: 1736380800,
-          message_id: 25,
-          text: "Legacy plugin approval required.",
+    await expect(
+      callbackHandler({
+        callbackQuery: {
+          id: "cbq-legacy-plugin-fallback-blocked",
+          data: "/approve 138e9b8c allow-once",
+          from: { id: 9, first_name: "Ada", username: "ada_bot" },
+          message: {
+            chat: { id: 1234, type: "private" },
+            date: 1736380800,
+            message_id: 25,
+            text: "Legacy plugin approval required.",
+          },
         },
-      },
-      me: { username: "openclaw_bot" },
-      getFile: async () => ({ download: async () => new Uint8Array() }),
-    });
+        me: { username: "openclaw_bot" },
+        getFile: async () => ({ download: async () => new Uint8Array() }),
+      }),
+    ).rejects.toThrow("unknown or expired approval id");
 
     expect(resolveExecApprovalSpy).toHaveBeenCalledWith({
       cfg: expect.objectContaining({
@@ -666,11 +673,7 @@ describe("createTelegramBot", () => {
     });
     expect(editMessageReplyMarkupSpy).not.toHaveBeenCalled();
     expect(replySpy).not.toHaveBeenCalled();
-    expect(sendMessageSpy).toHaveBeenCalledWith(
-      1234,
-      `${CROSS_MARK_EMOJI} Failed to submit approval. Please try again or contact an admin.`,
-      undefined,
-    );
+    expect(sendMessageSpy).not.toHaveBeenCalled();
     expect(answerCallbackQuerySpy).toHaveBeenCalledWith("cbq-legacy-plugin-fallback-blocked");
   });
 
@@ -1277,10 +1280,44 @@ describe("createTelegramBot", () => {
     expect(payload.ReplyToSender).toBe("Ada");
   });
 
+  it("keeps reply linkage while omitting filtered binary reply captions", async () => {
+    onSpy.mockClear();
+    sendMessageSpy.mockClear();
+    replySpy.mockClear();
+
+    createTelegramBot({ token: "tok" });
+    const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
+
+    await handler({
+      message: {
+        chat: { id: 7, type: "private" },
+        text: "Sure, see below",
+        date: 1736380800,
+        reply_to_message: {
+          message_id: 9001,
+          caption: "PK\x00\x03\x04binary",
+          from: { first_name: "Ada" },
+        },
+      },
+      me: { username: "openclaw_bot" },
+      getFile: async () => ({ download: async () => new Uint8Array() }),
+    });
+
+    expect(replySpy).toHaveBeenCalledTimes(1);
+    const payload = replySpy.mock.calls[0][0];
+    expect(payload.Body).toContain("[Replying to Ada id:9001]");
+    expect(payload.Body).not.toContain("PK");
+    expect(payload.Body).not.toContain("unsafe reply text omitted");
+    expect(payload.ReplyToBody).toBeUndefined();
+    expect(payload.ReplyToId).toBe("9001");
+    expect(payload.ReplyToSender).toBe("Ada");
+  });
+
   it("includes replied image media in inbound context for text replies", async () => {
     onSpy.mockClear();
     replySpy.mockClear();
     getFileSpy.mockClear();
+    loadWebMedia.mockResolvedValueOnce({ path: "/tmp/reply-photo.png", contentType: "image/png" });
 
     const mediaFetch = vi.fn(
       async () =>
@@ -1289,30 +1326,35 @@ describe("createTelegramBot", () => {
           headers: { "content-type": "image/png" },
         }),
     );
+    const ssrfMock = mockPinnedHostnameResolution();
 
-    createTelegramBot({
-      token: "tok",
-      telegramTransport: {
-        fetch: mediaFetch as typeof fetch,
-        sourceFetch: mediaFetch as typeof fetch,
-      },
-    });
-    const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
-
-    await handler({
-      message: {
-        chat: { id: 7, type: "private" },
-        text: "what is in this image?",
-        date: 1736380800,
-        reply_to_message: {
-          message_id: 9001,
-          photo: [{ file_id: "reply-photo-1" }],
-          from: { first_name: "Ada" },
+    try {
+      createTelegramBot({
+        token: "tok",
+        telegramTransport: {
+          fetch: mediaFetch as typeof fetch,
+          sourceFetch: mediaFetch as typeof fetch,
         },
-      },
-      me: { username: "openclaw_bot" },
-      getFile: async () => ({}),
-    });
+      });
+      const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
+
+      await handler({
+        message: {
+          chat: { id: 7, type: "private" },
+          text: "what is in this image?",
+          date: 1736380800,
+          reply_to_message: {
+            message_id: 9001,
+            photo: [{ file_id: "reply-photo-1" }],
+            from: { first_name: "Ada" },
+          },
+        },
+        me: { username: "openclaw_bot" },
+        getFile: async () => ({}),
+      });
+    } finally {
+      ssrfMock.mockRestore();
+    }
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = replySpy.mock.calls[0][0] as {
@@ -1322,6 +1364,7 @@ describe("createTelegramBot", () => {
     };
     expect(payload.ReplyToBody).toBe("<media:image>");
     expect(getFileSpy).toHaveBeenCalledWith("reply-photo-1");
+    expect(loadWebMedia).not.toHaveBeenCalled();
     expect(mediaFetch).toHaveBeenCalledTimes(1);
   });
 
@@ -1388,17 +1431,24 @@ describe("createTelegramBot", () => {
       },
     });
 
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    const mediaFetch = vi.fn(
       async () =>
         new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
           status: 200,
           headers: { "content-type": "image/png" },
         }),
     );
+    const ssrfMock = mockPinnedHostnameResolution();
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     try {
       const replyDelivered = waitForReplyCalls(1);
-      createTelegramBot({ token: "tok" });
+      createTelegramBot({
+        token: "tok",
+        telegramTransport: {
+          fetch: mediaFetch as typeof fetch,
+          sourceFetch: mediaFetch as typeof fetch,
+        },
+      });
       const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
 
       await handler({
@@ -1455,9 +1505,10 @@ describe("createTelegramBot", () => {
 
       expect(getFileSpy).toHaveBeenCalledTimes(1);
       expect(getFileSpy).toHaveBeenCalledWith("reply-photo-1");
+      expect(mediaFetch).toHaveBeenCalledTimes(1);
     } finally {
       setTimeoutSpy.mockRestore();
-      fetchSpy.mockRestore();
+      ssrfMock.mockRestore();
     }
   });
 

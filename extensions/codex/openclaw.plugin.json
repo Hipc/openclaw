@@ -3,6 +3,9 @@
   "name": "Codex",
   "description": "Codex app-server harness and Codex-managed GPT model catalog.",
   "providers": ["codex"],
+  "activation": {
+    "onAgentHarnesses": ["codex"]
+  },
   "commandAliases": [
     {
       "name": "codex",
@@ -122,6 +125,11 @@
       "label": "Auth Token",
       "help": "Bearer token sent to the WebSocket app-server.",
       "sensitive": true,
+      "advanced": true
+    },
+    "appServer.headers": {
+      "label": "Headers",
+      "help": "Additional headers sent to the WebSocket app-server.",
       "advanced": true
     },
     "appServer.requestTimeoutMs": {

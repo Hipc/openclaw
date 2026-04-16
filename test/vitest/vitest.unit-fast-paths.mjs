@@ -12,9 +12,12 @@ const unitFastCandidateGlobs = [
   "packages/memory-host-sdk/**/*.test.ts",
   "packages/plugin-package-contract/**/*.test.ts",
   "src/acp/**/*.test.ts",
+  "src/agents/**/*.test.ts",
+  "src/auto-reply/**/*.test.ts",
   "src/bootstrap/**/*.test.ts",
   "src/channels/**/*.test.ts",
   "src/cli/**/*.test.ts",
+  "src/commands/**/*.test.ts",
   "src/config/**/*.test.ts",
   "src/daemon/**/*.test.ts",
   "src/i18n/**/*.test.ts",
@@ -32,6 +35,7 @@ const unitFastCandidateGlobs = [
   "src/music-generation/**/*.test.ts",
   "src/node-host/**/*.test.ts",
   "src/plugin-sdk/**/*.test.ts",
+  "src/plugins/**/*.test.ts",
   "src/poll-params.test.ts",
   "src/polls.test.ts",
   "src/process/**/*.test.ts",
@@ -58,10 +62,12 @@ const broadUnitFastCandidateSkipGlobs = [
   "**/*.live.test.ts",
   "test/fixtures/**/*.test.ts",
   "test/setup-home-isolation.test.ts",
+  "src/agents/sandbox.resolveSandboxContext.test.ts",
   "src/channels/plugins/contracts/**/*.test.ts",
   "src/config/**/*.test.ts",
   "src/gateway/**/*.test.ts",
   "src/media-generation/**/*.contract.test.ts",
+  "src/plugins/contracts/**/*.test.ts",
   "src/plugin-sdk/browser-subpaths.test.ts",
   "src/security/**/*.test.ts",
   "src/secrets/**/*.test.ts",
@@ -208,24 +214,49 @@ export function collectUnitFastTestFileAnalysis(cwd = process.cwd(), options = {
   });
 }
 
-export const unitFastTestFiles = collectUnitFastTestFileAnalysis()
-  .filter((entry) => entry.unitFast)
-  .map((entry) => entry.file);
+let cachedUnitFastTestFiles = null;
+let cachedUnitFastTestFileSet = null;
+let cachedSourceToUnitFastTestFile = null;
 
-const unitFastTestFileSet = new Set(unitFastTestFiles);
-const sourceToUnitFastTestFile = new Map(
-  [...pluginSdkLightSourceFiles, ...commandsLightSourceFiles].flatMap((sourceFile) => {
-    const testFile = sourceFile.replace(/\.ts$/u, ".test.ts");
-    return unitFastTestFileSet.has(testFile) ? [[sourceFile, testFile]] : [];
-  }),
-);
+export function getUnitFastTestFiles() {
+  if (cachedUnitFastTestFiles !== null) {
+    return cachedUnitFastTestFiles;
+  }
+  cachedUnitFastTestFiles = collectUnitFastTestFileAnalysis()
+    .filter((entry) => entry.unitFast)
+    .map((entry) => entry.file);
+  return cachedUnitFastTestFiles;
+}
+
+function getUnitFastTestFileSet() {
+  if (cachedUnitFastTestFileSet !== null) {
+    return cachedUnitFastTestFileSet;
+  }
+  cachedUnitFastTestFileSet = new Set(getUnitFastTestFiles());
+  return cachedUnitFastTestFileSet;
+}
+
+function getSourceToUnitFastTestFile() {
+  if (cachedSourceToUnitFastTestFile !== null) {
+    return cachedSourceToUnitFastTestFile;
+  }
+  const unitFastTestFileSet = getUnitFastTestFileSet();
+  cachedSourceToUnitFastTestFile = new Map(
+    [...pluginSdkLightSourceFiles, ...commandsLightSourceFiles].flatMap((sourceFile) => {
+      const testFile = sourceFile.replace(/\.ts$/u, ".test.ts");
+      return unitFastTestFileSet.has(testFile) ? [[sourceFile, testFile]] : [];
+    }),
+  );
+  return cachedSourceToUnitFastTestFile;
+}
 
 export function isUnitFastTestFile(file) {
-  return unitFastTestFileSet.has(normalizeRepoPath(file));
+  return getUnitFastTestFileSet().has(normalizeRepoPath(file));
 }
 
 export function resolveUnitFastTestIncludePattern(file) {
   const normalized = normalizeRepoPath(file);
+  const unitFastTestFileSet = getUnitFastTestFileSet();
   if (unitFastTestFileSet.has(normalized)) {
     return normalized;
   }
@@ -233,5 +264,5 @@ export function resolveUnitFastTestIncludePattern(file) {
   if (unitFastTestFileSet.has(siblingTestFile)) {
     return siblingTestFile;
   }
-  return sourceToUnitFastTestFile.get(normalized) ?? null;
+  return getSourceToUnitFastTestFile().get(normalized) ?? null;
 }
